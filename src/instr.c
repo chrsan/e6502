@@ -19,7 +19,7 @@ static void addr_mode_zpy(struct Cpu* cpu, u16* addr) {
 
 static void addr_mode_rel(struct Cpu* cpu, u16* addr) {
   *addr = read(cpu, cpu->pc++);
-  if (*addr & 0x80) {
+  if (*addr & 0x0080) {
     *addr |= 0xff00;
   }
 }
