@@ -19,7 +19,7 @@ enum InterruptType {
 struct Bus {
   void* ctx;
 
-  uint8_t (*read)(void* ctx, u16 addr);
+  u8 (*read)(void* ctx, u16 addr);
   void (*write)(void* ctx, u16 addr, u8 data);
 };
 
