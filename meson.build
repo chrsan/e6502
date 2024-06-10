@@ -3,9 +3,9 @@ project('e6502', 'c')
 e6502_includes = include_directories('include')
 
 e6502_sources = files(
-  'src/addr.c',
-  'src/instr.c',
   'src/cpu.c',
+  'src/instr.c',
+  'src/op.c',
 )
 
 e6502_library = library(
@@ -20,7 +20,7 @@ e6502_dependency = declare_dependency(
 )
 
 executable(
-  'sandbox',
-  files('apps/sandbox.c'),
+  'e6502',
+  files('apps/e6502.c'),
   dependencies: e6502_dependency,
 )

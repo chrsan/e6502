@@ -1,0 +1,12 @@
+asm_flags  = --cpu 6502 --target none
+link_flags = --target none
+
+rule asm
+  command = ca65 $asm_flags -o $out $in
+
+rule link
+  command = ld65 $link_flags -o $out $in
+
+build hello.o: asm hello.asm
+
+build hello.bin: link hello.o

@@ -1,441 +1,329 @@
 #include <stdbool.h>
-#include <stdint.h>
+#include <stdlib.h>
 
 #include "cpu.h"
 
-static void add_branch_cycles(struct InstructionContext* ctx) {
-  ++ctx->cycles;
-  if (pages_differ(ctx->pc, ctx->address)) {
-    ++ctx->cycles;
+static void addr_mode_imm(struct Cpu* cpu, u16* addr) { *addr = cpu->pc++; }
+
+static void addr_mode_zp(struct Cpu* cpu, u16* addr) {
+  *addr = read(cpu, cpu->pc++) & 0x00ff;
+}
+
+static void addr_mode_zpx(struct Cpu* cpu, u16* addr) {
+  *addr = (read(cpu, cpu->pc++) + cpu->x) & 0x00ff;
+}
+
+static void addr_mode_zpy(struct Cpu* cpu, u16* addr) {
+  *addr = (read(cpu, cpu->pc++) + cpu->y) & 0x00ff;
+}
+
+static void addr_mode_rel(struct Cpu* cpu, u16* addr) {
+  *addr = read(cpu, cpu->pc++);
+  if (*addr & 0x80) {
+    *addr |= 0xff00;
   }
 }
 
-static void set_negative_flag(struct Cpu* cpu, uint8_t value) {
-  set_flag(cpu, kFlagNegative, (value & 0x80) != 0);
+static void addr_mode_abs(struct Cpu* cpu, u16* addr) {
+  u16 lo = read(cpu, cpu->pc++);
+  u16 hi = read(cpu, cpu->pc++);
+  *addr = (hi << 8) | lo;
 }
 
-static void set_zero_flag(struct Cpu* cpu, uint8_t value) {
-  set_flag(cpu, kFlagZero, value == 0);
+static void addr_mode_abx(struct Cpu* cpu, u16* addr) {
+  u16 lo = read(cpu, cpu->pc++);
+  u16 hi = read(cpu, cpu->pc++);
+  *addr = ((hi << 8) | lo) + cpu->x;
 }
 
-static void compare(struct Cpu* cpu, uint8_t a, uint8_t b) {
-  uint8_t c = a - b;
-  set_negative_flag(cpu, c);
-  set_zero_flag(cpu, c);
-  set_flag(cpu, kFlagCarry, a >= b);
+static void addr_mode_aby(struct Cpu* cpu, u16* addr) {
+  u16 lo = read(cpu, cpu->pc++);
+  u16 hi = read(cpu, cpu->pc++);
+  *addr = ((hi << 8) | lo) + cpu->y;
 }
 
-static void instr_adc(struct Cpu* cpu, struct InstructionContext* ctx) {
-  uint8_t a = cpu->a;
-  uint8_t b = cpu->bus->read(cpu->bus->ctx, ctx->address);
-  bool c = get_flag(cpu, kFlagCarry);
-
-  uint16_t d = a + b + c;
-  cpu->a = a + b + c;
-  set_negative_flag(cpu, cpu->a);
-  set_zero_flag(cpu, cpu->a);
-  set_flag(cpu, kFlagCarry, d > 0xff);
-  set_flag(cpu, kFlagOverflow,
-           ((a ^ b) & 0x80) == 0 && ((a ^ cpu->a) & 0x80) != 0);
-}
-
-static void instr_and(struct Cpu* cpu, struct InstructionContext* ctx) {
-  cpu->a &= cpu->bus->read(cpu->bus->ctx, ctx->address);
-  set_negative_flag(cpu, cpu->a);
-  set_zero_flag(cpu, cpu->a);
-}
-
-static void instr_asl(struct Cpu* cpu, struct InstructionContext* ctx) {
-  if (ctx->address_mode == kAddressModeAccumulator) {
-    set_flag(cpu, kFlagCarry, ((cpu->a >> 7) & 1) != 0);
-
-    cpu->a <<= 1;
-    set_negative_flag(cpu, cpu->a);
-    set_zero_flag(cpu, cpu->a);
+static void addr_mode_ind(struct Cpu* cpu, u16* addr) {
+  u16 lo = read(cpu, cpu->pc++);
+  u16 hi = read(cpu, cpu->pc++);
+  u16 a = (hi << 8) | lo;
+  if (lo == 0x00ff) {
+    *addr = (read(cpu, a & 0xff00) << 8) | read(cpu, a);
   } else {
-    uint8_t value = cpu->bus->read(cpu->bus->ctx, ctx->address);
-    set_flag(cpu, kFlagCarry, ((value >> 7) & 1) != 0);
-
-    value <<= 1;
-    cpu->bus->write(cpu->bus->ctx, ctx->address, value);
-    set_negative_flag(cpu, value);
-    set_zero_flag(cpu, value);
+    *addr = (read(cpu, a + 1) << 8) | read(cpu, a);
   }
 }
 
-static void instr_bcc(struct Cpu* cpu, struct InstructionContext* ctx) {
-  if (!get_flag(cpu, kFlagCarry)) {
-    cpu->pc = ctx->address;
-    add_branch_cycles(ctx);
-  }
+static void addr_mode_izx(struct Cpu* cpu, u16* addr) {
+  u16 a = read(cpu, cpu->pc++);
+  u16 lo = read(cpu, (a + cpu->x) & 0x00ff);
+  u16 hi = read(cpu, (a + cpu->x + 1) & 0x00ff);
+  *addr = (hi << 8) | lo;
 }
 
-static void instr_bcs(struct Cpu* cpu, struct InstructionContext* ctx) {
-  if (get_flag(cpu, kFlagCarry)) {
-    cpu->pc = ctx->address;
-    add_branch_cycles(ctx);
-  }
+static void addr_mode_izy(struct Cpu* cpu, u16* addr) {
+  u16 a = read(cpu, cpu->pc++);
+  u16 lo = read(cpu, a & 0x00ff);
+  u16 hi = read(cpu, (a + 1) & 0x00ff);
+  *addr = ((hi << 8) | lo) + cpu->y;
 }
 
-static void instr_beq(struct Cpu* cpu, struct InstructionContext* ctx) {
-  if (get_flag(cpu, kFlagZero)) {
-    cpu->pc = ctx->address;
-    add_branch_cycles(ctx);
-  }
-}
+static void op_xxx(struct Cpu* cpu, u16 addr, bool implied) {}
 
-static void instr_bit(struct Cpu* cpu, struct InstructionContext* ctx) {
-  uint8_t value = cpu->bus->read(cpu->bus->ctx, ctx->address);
-  set_negative_flag(cpu, value);
-  set_zero_flag(cpu, value & cpu->a);
-  set_flag(cpu, kFlagOverflow, ((value >> 6) & 1) != 0);
-}
-
-static void instr_bmi(struct Cpu* cpu, struct InstructionContext* ctx) {
-  if (get_flag(cpu, kFlagNegative)) {
-    cpu->pc = ctx->address;
-    add_branch_cycles(ctx);
-  }
-}
-
-static void instr_bne(struct Cpu* cpu, struct InstructionContext* ctx) {
-  if (!get_flag(cpu, kFlagZero)) {
-    cpu->pc = ctx->address;
-    add_branch_cycles(ctx);
-  }
-}
-
-static void instr_bpl(struct Cpu* cpu, struct InstructionContext* ctx) {
-  if (!get_flag(cpu, kFlagNegative)) {
-    cpu->pc = ctx->address;
-    add_branch_cycles(ctx);
-  }
-}
-
-static void instr_brk(struct Cpu* cpu, struct InstructionContext* ctx) {
-  push16(cpu, cpu->pc);
-  push8(cpu, cpu->p | 0x10);
-  set_flag(cpu, kFlagInterrupt, true);
-  cpu->pc = read16(cpu, 0xfffe, false);
-}
-
-static void instr_bvc(struct Cpu* cpu, struct InstructionContext* ctx) {
-  if (!get_flag(cpu, kFlagOverflow)) {
-    cpu->pc = ctx->address;
-    add_branch_cycles(ctx);
-  }
-}
-
-static void instr_bvs(struct Cpu* cpu, struct InstructionContext* ctx) {
-  if (get_flag(cpu, kFlagOverflow)) {
-    cpu->pc = ctx->address;
-    add_branch_cycles(ctx);
-  }
-}
-
-static void instr_clc(struct Cpu* cpu, struct InstructionContext* ctx) {
-  set_flag(cpu, kFlagCarry, false);
-}
-
-static void instr_cld(struct Cpu* cpu, struct InstructionContext* ctx) {
-  set_flag(cpu, kFlagDecimal, false);
-}
-
-static void instr_cli(struct Cpu* cpu, struct InstructionContext* ctx) {
-  set_flag(cpu, kFlagInterrupt, false);
-}
-
-static void instr_clv(struct Cpu* cpu, struct InstructionContext* ctx) {
-  set_flag(cpu, kFlagOverflow, false);
-}
-
-static void instr_cmp(struct Cpu* cpu, struct InstructionContext* ctx) {
-  uint8_t value = cpu->bus->read(cpu->bus->ctx, ctx->address);
-  compare(cpu, cpu->a, value);
-}
-
-static void instr_cpx(struct Cpu* cpu, struct InstructionContext* ctx) {
-  uint8_t value = cpu->bus->read(cpu->bus->ctx, ctx->address);
-  compare(cpu, cpu->x, value);
-}
-
-static void instr_cpy(struct Cpu* cpu, struct InstructionContext* ctx) {
-  uint8_t value = cpu->bus->read(cpu->bus->ctx, ctx->address);
-  compare(cpu, cpu->y, value);
-}
-
-static void instr_dec(struct Cpu* cpu, struct InstructionContext* ctx) {
-  uint8_t value = cpu->bus->read(cpu->bus->ctx, ctx->address) - 1;
-  cpu->bus->write(cpu->bus->ctx, ctx->address, value);
-  set_negative_flag(cpu, value);
-  set_zero_flag(cpu, value);
-}
-
-static void instr_dex(struct Cpu* cpu, struct InstructionContext* ctx) {
-  --cpu->x;
-  set_negative_flag(cpu, cpu->x);
-  set_zero_flag(cpu, cpu->x);
-}
-
-static void instr_dey(struct Cpu* cpu, struct InstructionContext* ctx) {
-  --cpu->y;
-  set_negative_flag(cpu, cpu->y);
-  set_zero_flag(cpu, cpu->y);
-}
-
-static void instr_eor(struct Cpu* cpu, struct InstructionContext* ctx) {
-  cpu->a ^= cpu->bus->read(cpu->bus->ctx, ctx->address);
-  set_negative_flag(cpu, cpu->a);
-  set_zero_flag(cpu, cpu->a);
-}
-
-static void instr_inc(struct Cpu* cpu, struct InstructionContext* ctx) {
-  uint8_t value = cpu->bus->read(cpu->bus->ctx, ctx->address) + 1;
-  cpu->bus->write(cpu->bus->ctx, ctx->address, value);
-  set_negative_flag(cpu, value);
-  set_zero_flag(cpu, value);
-}
-
-static void instr_inx(struct Cpu* cpu, struct InstructionContext* ctx) {
-  ++cpu->x;
-  set_negative_flag(cpu, cpu->x);
-  set_zero_flag(cpu, cpu->x);
-}
-
-static void instr_iny(struct Cpu* cpu, struct InstructionContext* ctx) {
-  ++cpu->y;
-  set_negative_flag(cpu, cpu->y);
-  set_zero_flag(cpu, cpu->y);
-}
-
-static void instr_jmp(struct Cpu* cpu, struct InstructionContext* ctx) {
-  cpu->pc = ctx->address;
-}
-
-static void instr_jsr(struct Cpu* cpu, struct InstructionContext* ctx) {
-  push16(cpu, cpu->pc - 1);
-  cpu->pc = ctx->address;
-}
-
-static void instr_lda(struct Cpu* cpu, struct InstructionContext* ctx) {
-  cpu->a = cpu->bus->read(cpu->bus->ctx, ctx->address);
-  set_negative_flag(cpu, cpu->a);
-  set_zero_flag(cpu, cpu->a);
-}
-
-static void instr_ldx(struct Cpu* cpu, struct InstructionContext* ctx) {
-  cpu->x = cpu->bus->read(cpu->bus->ctx, ctx->address);
-  set_negative_flag(cpu, cpu->x);
-  set_zero_flag(cpu, cpu->x);
-}
-
-static void instr_ldy(struct Cpu* cpu, struct InstructionContext* ctx) {
-  cpu->y = cpu->bus->read(cpu->bus->ctx, ctx->address);
-  set_negative_flag(cpu, cpu->y);
-  set_zero_flag(cpu, cpu->y);
-}
-
-static void instr_lsr(struct Cpu* cpu, struct InstructionContext* ctx) {
-  if (ctx->address_mode == kAddressModeAccumulator) {
-    set_flag(cpu, kFlagCarry, (cpu->a & 1) != 0);
-
-    cpu->a >>= 1;
-    set_negative_flag(cpu, cpu->a);
-    set_zero_flag(cpu, cpu->a);
-  } else {
-    uint8_t value = cpu->bus->read(cpu->bus->ctx, ctx->address);
-    set_flag(cpu, kFlagCarry, (value & 1) != 0);
-
-    value >>= 1;
-    cpu->bus->write(cpu->bus->ctx, ctx->address, value);
-    set_negative_flag(cpu, value);
-    set_zero_flag(cpu, value);
-  }
-}
-
-static void instr_nop(struct Cpu* cpu, struct InstructionContext* ctx) {}
-
-static void instr_ora(struct Cpu* cpu, struct InstructionContext* ctx) {
-  cpu->a |= cpu->bus->read(cpu->bus->ctx, ctx->address);
-  set_negative_flag(cpu, cpu->a);
-  set_zero_flag(cpu, cpu->a);
-}
-
-static void instr_pha(struct Cpu* cpu, struct InstructionContext* ctx) {
-  push8(cpu, cpu->a);
-}
-
-static void instr_php(struct Cpu* cpu, struct InstructionContext* ctx) {
-  push8(cpu, cpu->p | 0x10);
-}
-
-static void instr_pla(struct Cpu* cpu, struct InstructionContext* ctx) {
-  cpu->a = pull8(cpu);
-  set_negative_flag(cpu, cpu->a);
-  set_zero_flag(cpu, cpu->a);
-}
-
-static void instr_plp(struct Cpu* cpu, struct InstructionContext* ctx) {
-  cpu->p = (pull8(cpu) & 0xef) | 0x20;
-}
-
-static void instr_rol(struct Cpu* cpu, struct InstructionContext* ctx) {
-  if (ctx->address_mode == kAddressModeAccumulator) {
-    bool c = get_flag(cpu, kFlagCarry);
-    set_flag(cpu, kFlagCarry, ((cpu->a >> 7) & 1) != 0);
-
-    cpu->a = (cpu->a << 7) | c;
-    set_negative_flag(cpu, cpu->a);
-    set_zero_flag(cpu, cpu->a);
-  } else {
-    bool c = get_flag(cpu, kFlagCarry);
-    uint8_t value = cpu->bus->read(cpu->bus->ctx, ctx->address);
-    set_flag(cpu, kFlagCarry, ((value >> 7) & 1) != 0);
-
-    value = (value << 1) | c;
-    cpu->bus->write(cpu->bus->ctx, ctx->address, value);
-    set_negative_flag(cpu, value);
-    set_zero_flag(cpu, value);
-  }
-}
-
-static void instr_ror(struct Cpu* cpu, struct InstructionContext* ctx) {
-  if (ctx->address_mode == kAddressModeAccumulator) {
-    bool c = get_flag(cpu, kFlagCarry);
-    set_flag(cpu, kFlagCarry, (cpu->a & 1) != 0);
-
-    cpu->a = (cpu->a >> 1) | (c << 7);
-    set_negative_flag(cpu, cpu->a);
-    set_zero_flag(cpu, cpu->a);
-  } else {
-    bool c = get_flag(cpu, kFlagCarry);
-    uint8_t value = cpu->bus->read(cpu->bus->ctx, ctx->address);
-    set_flag(cpu, kFlagCarry, (value & 1) != 0);
-
-    value = (value >> 1) | (c << 7);
-    cpu->bus->write(cpu->bus->ctx, ctx->address, value);
-    set_negative_flag(cpu, value);
-    set_zero_flag(cpu, value);
-  }
-}
-
-static void instr_rti(struct Cpu* cpu, struct InstructionContext* ctx) {
-  cpu->p = (pull8(cpu) & 0xef) | 0x20;
-  cpu->pc = pull16(cpu);
-}
-
-static void instr_rts(struct Cpu* cpu, struct InstructionContext* ctx) {
-  cpu->pc = pull16(cpu) + 1;
-}
-
-static void instr_sbc(struct Cpu* cpu, struct InstructionContext* ctx) {
-  uint8_t a = cpu->a;
-  uint8_t b = cpu->bus->read(cpu->bus->ctx, ctx->address);
-  bool c = get_flag(cpu, kFlagCarry);
-
-  int16_t d = a - b - (1 - c);
-  cpu->a = a - b - (1 - c);
-  set_negative_flag(cpu, cpu->a);
-  set_zero_flag(cpu, cpu->a);
-  set_flag(cpu, kFlagCarry, d >= 0);
-  set_flag(cpu, kFlagOverflow,
-           ((a ^ b) & 0x80) == 0 && ((a ^ cpu->a) & 0x80) != 0);
-}
-
-static void instr_sec(struct Cpu* cpu, struct InstructionContext* ctx) {
-  set_flag(cpu, kFlagCarry, true);
-}
-
-static void instr_sed(struct Cpu* cpu, struct InstructionContext* ctx) {
-  set_flag(cpu, kFlagDecimal, true);
-}
-
-static void instr_sei(struct Cpu* cpu, struct InstructionContext* ctx) {
-  set_flag(cpu, kFlagInterrupt, true);
-}
-
-static void instr_sta(struct Cpu* cpu, struct InstructionContext* ctx) {
-  cpu->bus->write(cpu->bus->ctx, ctx->address, cpu->a);
-}
-
-static void instr_stx(struct Cpu* cpu, struct InstructionContext* ctx) {
-  cpu->bus->write(cpu->bus->ctx, ctx->address, cpu->x);
-}
-
-static void instr_sty(struct Cpu* cpu, struct InstructionContext* ctx) {
-  cpu->bus->write(cpu->bus->ctx, ctx->address, cpu->y);
-}
-
-static void instr_tax(struct Cpu* cpu, struct InstructionContext* ctx) {
-  cpu->x = cpu->a;
-  set_negative_flag(cpu, cpu->x);
-  set_zero_flag(cpu, cpu->x);
-}
-
-static void instr_tay(struct Cpu* cpu, struct InstructionContext* ctx) {
-  cpu->y = cpu->a;
-  set_negative_flag(cpu, cpu->y);
-  set_zero_flag(cpu, cpu->y);
-}
-
-static void instr_tsx(struct Cpu* cpu, struct InstructionContext* ctx) {
-  cpu->x = cpu->s;
-  set_negative_flag(cpu, cpu->x);
-  set_zero_flag(cpu, cpu->x);
-}
-
-static void instr_txa(struct Cpu* cpu, struct InstructionContext* ctx) {
-  cpu->a = cpu->x;
-  set_negative_flag(cpu, cpu->a);
-  set_zero_flag(cpu, cpu->a);
-}
-
-static void instr_txs(struct Cpu* cpu, struct InstructionContext* ctx) {
-  cpu->s = cpu->x;
-}
-
-static void instr_tya(struct Cpu* cpu, struct InstructionContext* ctx) {
-  cpu->a = cpu->x;
-  set_negative_flag(cpu, cpu->a);
-  set_zero_flag(cpu, cpu->a);
-}
-
-Instruction instructions[256] = {
-    instr_brk, instr_ora, instr_nop, instr_nop, instr_nop, instr_ora, instr_asl,
-    instr_nop, instr_php, instr_ora, instr_asl, instr_nop, instr_nop, instr_ora,
-    instr_asl, instr_nop, instr_bpl, instr_ora, instr_nop, instr_nop, instr_nop,
-    instr_ora, instr_asl, instr_nop, instr_clc, instr_ora, instr_nop, instr_nop,
-    instr_nop, instr_ora, instr_asl, instr_nop, instr_jsr, instr_and, instr_nop,
-    instr_nop, instr_bit, instr_and, instr_rol, instr_nop, instr_plp, instr_and,
-    instr_rol, instr_nop, instr_bit, instr_and, instr_rol, instr_nop, instr_bmi,
-    instr_and, instr_nop, instr_nop, instr_nop, instr_and, instr_rol, instr_nop,
-    instr_sec, instr_and, instr_nop, instr_nop, instr_nop, instr_and, instr_rol,
-    instr_nop, instr_rti, instr_eor, instr_nop, instr_nop, instr_nop, instr_eor,
-    instr_lsr, instr_nop, instr_pha, instr_eor, instr_lsr, instr_nop, instr_jmp,
-    instr_eor, instr_lsr, instr_nop, instr_bvc, instr_eor, instr_nop, instr_nop,
-    instr_nop, instr_eor, instr_lsr, instr_nop, instr_cli, instr_eor, instr_nop,
-    instr_nop, instr_nop, instr_eor, instr_lsr, instr_nop, instr_rts, instr_adc,
-    instr_nop, instr_nop, instr_nop, instr_adc, instr_ror, instr_nop, instr_pla,
-    instr_adc, instr_ror, instr_nop, instr_jmp, instr_adc, instr_ror, instr_nop,
-    instr_bvs, instr_adc, instr_nop, instr_nop, instr_nop, instr_adc, instr_ror,
-    instr_nop, instr_sei, instr_adc, instr_nop, instr_nop, instr_nop, instr_adc,
-    instr_ror, instr_nop, instr_nop, instr_sta, instr_nop, instr_nop, instr_sty,
-    instr_sta, instr_stx, instr_nop, instr_dey, instr_nop, instr_txa, instr_nop,
-    instr_sty, instr_sta, instr_stx, instr_nop, instr_bcc, instr_sta, instr_nop,
-    instr_nop, instr_sty, instr_sta, instr_stx, instr_nop, instr_tya, instr_sta,
-    instr_txs, instr_nop, instr_nop, instr_sta, instr_nop, instr_nop, instr_ldy,
-    instr_lda, instr_ldx, instr_nop, instr_ldy, instr_lda, instr_ldx, instr_nop,
-    instr_tay, instr_lda, instr_tax, instr_nop, instr_ldy, instr_lda, instr_ldx,
-    instr_nop, instr_bcs, instr_lda, instr_nop, instr_nop, instr_ldy, instr_lda,
-    instr_ldx, instr_nop, instr_clv, instr_lda, instr_tsx, instr_nop, instr_ldy,
-    instr_lda, instr_ldx, instr_nop, instr_cpy, instr_cmp, instr_nop, instr_nop,
-    instr_cpy, instr_cmp, instr_dec, instr_nop, instr_iny, instr_cmp, instr_dex,
-    instr_nop, instr_cpy, instr_cmp, instr_dec, instr_nop, instr_bne, instr_cmp,
-    instr_nop, instr_nop, instr_nop, instr_cmp, instr_dec, instr_nop, instr_cld,
-    instr_cmp, instr_nop, instr_nop, instr_nop, instr_cmp, instr_dec, instr_nop,
-    instr_cpx, instr_sbc, instr_nop, instr_nop, instr_cpx, instr_sbc, instr_inc,
-    instr_nop, instr_inx, instr_sbc, instr_nop, instr_sbc, instr_cpx, instr_sbc,
-    instr_inc, instr_nop, instr_beq, instr_sbc, instr_nop, instr_nop, instr_nop,
-    instr_sbc, instr_inc, instr_nop, instr_sed, instr_sbc, instr_nop, instr_nop,
-    instr_nop, instr_sbc, instr_inc, instr_nop,
+struct Instruction instructions[256] = {
+    {.name = "BRK", .op_impl = op_brk, .addr_mode = NULL},
+    {.name = "ORA", .op_impl = op_ora, .addr_mode = addr_mode_izx},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_nop, .addr_mode = NULL},
+    {.name = "ORA", .op_impl = op_ora, .addr_mode = addr_mode_zp},
+    {.name = "ASL", .op_impl = op_asl, .addr_mode = addr_mode_zp},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "PHP", .op_impl = op_php, .addr_mode = NULL},
+    {.name = "ORA", .op_impl = op_ora, .addr_mode = addr_mode_imm},
+    {.name = "ASL", .op_impl = op_asl, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_nop, .addr_mode = NULL},
+    {.name = "ORA", .op_impl = op_ora, .addr_mode = addr_mode_abs},
+    {.name = "ASL", .op_impl = op_asl, .addr_mode = addr_mode_abs},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "BPL", .op_impl = op_bpl, .addr_mode = addr_mode_rel},
+    {.name = "ORA", .op_impl = op_ora, .addr_mode = addr_mode_izy},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_nop, .addr_mode = NULL},
+    {.name = "ORA", .op_impl = op_ora, .addr_mode = addr_mode_zpx},
+    {.name = "ASL", .op_impl = op_asl, .addr_mode = addr_mode_zpx},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "CLC", .op_impl = op_clc, .addr_mode = NULL},
+    {.name = "ORA", .op_impl = op_ora, .addr_mode = addr_mode_aby},
+    {.name = "???", .op_impl = op_nop, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_nop, .addr_mode = NULL},
+    {.name = "ORA", .op_impl = op_ora, .addr_mode = addr_mode_abx},
+    {.name = "ASL", .op_impl = op_asl, .addr_mode = addr_mode_abx},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "JSR", .op_impl = op_jsr, .addr_mode = addr_mode_abs},
+    {.name = "AND", .op_impl = op_and, .addr_mode = addr_mode_izx},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "BIT", .op_impl = op_bit, .addr_mode = addr_mode_zp},
+    {.name = "AND", .op_impl = op_and, .addr_mode = addr_mode_zp},
+    {.name = "ROL", .op_impl = op_rol, .addr_mode = addr_mode_zp},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "PLP", .op_impl = op_plp, .addr_mode = NULL},
+    {.name = "AND", .op_impl = op_and, .addr_mode = addr_mode_imm},
+    {.name = "ROL", .op_impl = op_rol, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "BIT", .op_impl = op_bit, .addr_mode = addr_mode_abs},
+    {.name = "AND", .op_impl = op_and, .addr_mode = addr_mode_abs},
+    {.name = "ROL", .op_impl = op_rol, .addr_mode = addr_mode_abs},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "BMI", .op_impl = op_bmi, .addr_mode = addr_mode_rel},
+    {.name = "AND", .op_impl = op_and, .addr_mode = addr_mode_izy},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_nop, .addr_mode = NULL},
+    {.name = "AND", .op_impl = op_and, .addr_mode = addr_mode_zpx},
+    {.name = "ROL", .op_impl = op_rol, .addr_mode = addr_mode_zpx},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "SEC", .op_impl = op_sec, .addr_mode = NULL},
+    {.name = "AND", .op_impl = op_and, .addr_mode = addr_mode_aby},
+    {.name = "???", .op_impl = op_nop, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_nop, .addr_mode = NULL},
+    {.name = "AND", .op_impl = op_and, .addr_mode = addr_mode_abx},
+    {.name = "ROL", .op_impl = op_rol, .addr_mode = addr_mode_abx},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "RTI", .op_impl = op_rti, .addr_mode = NULL},
+    {.name = "EOR", .op_impl = op_eor, .addr_mode = addr_mode_izx},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_nop, .addr_mode = NULL},
+    {.name = "EOR", .op_impl = op_eor, .addr_mode = addr_mode_zp},
+    {.name = "LSR", .op_impl = op_lsr, .addr_mode = addr_mode_zp},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "PHA", .op_impl = op_pha, .addr_mode = NULL},
+    {.name = "EOR", .op_impl = op_eor, .addr_mode = addr_mode_imm},
+    {.name = "LSR", .op_impl = op_lsr, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "JMP", .op_impl = op_jmp, .addr_mode = addr_mode_abs},
+    {.name = "EOR", .op_impl = op_eor, .addr_mode = addr_mode_abs},
+    {.name = "LSR", .op_impl = op_lsr, .addr_mode = addr_mode_abs},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "BVC", .op_impl = op_bvc, .addr_mode = addr_mode_rel},
+    {.name = "EOR", .op_impl = op_eor, .addr_mode = addr_mode_izy},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_nop, .addr_mode = NULL},
+    {.name = "EOR", .op_impl = op_eor, .addr_mode = addr_mode_zpx},
+    {.name = "LSR", .op_impl = op_lsr, .addr_mode = addr_mode_zpx},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "CLI", .op_impl = op_cli, .addr_mode = NULL},
+    {.name = "EOR", .op_impl = op_eor, .addr_mode = addr_mode_aby},
+    {.name = "???", .op_impl = op_nop, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_nop, .addr_mode = NULL},
+    {.name = "EOR", .op_impl = op_eor, .addr_mode = addr_mode_abx},
+    {.name = "LSR", .op_impl = op_lsr, .addr_mode = addr_mode_abx},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "RTS", .op_impl = op_rts, .addr_mode = NULL},
+    {.name = "ADC", .op_impl = op_adc, .addr_mode = addr_mode_izx},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_nop, .addr_mode = NULL},
+    {.name = "ADC", .op_impl = op_adc, .addr_mode = addr_mode_zp},
+    {.name = "ROR", .op_impl = op_ror, .addr_mode = addr_mode_zp},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "PLA", .op_impl = op_pla, .addr_mode = NULL},
+    {.name = "ADC", .op_impl = op_adc, .addr_mode = addr_mode_imm},
+    {.name = "ROR", .op_impl = op_ror, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "JMP", .op_impl = op_jmp, .addr_mode = addr_mode_ind},
+    {.name = "ADC", .op_impl = op_adc, .addr_mode = addr_mode_abs},
+    {.name = "ROR", .op_impl = op_ror, .addr_mode = addr_mode_abs},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "BVS", .op_impl = op_bvs, .addr_mode = addr_mode_rel},
+    {.name = "ADC", .op_impl = op_adc, .addr_mode = addr_mode_izy},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_nop, .addr_mode = NULL},
+    {.name = "ADC", .op_impl = op_adc, .addr_mode = addr_mode_zpx},
+    {.name = "ROR", .op_impl = op_ror, .addr_mode = addr_mode_zpx},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "SEI", .op_impl = op_sei, .addr_mode = NULL},
+    {.name = "ADC", .op_impl = op_adc, .addr_mode = addr_mode_aby},
+    {.name = "???", .op_impl = op_nop, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_nop, .addr_mode = NULL},
+    {.name = "ADC", .op_impl = op_adc, .addr_mode = addr_mode_abx},
+    {.name = "ROR", .op_impl = op_ror, .addr_mode = addr_mode_abx},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_nop, .addr_mode = NULL},
+    {.name = "STA", .op_impl = op_sta, .addr_mode = addr_mode_izx},
+    {.name = "???", .op_impl = op_nop, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "STY", .op_impl = op_sty, .addr_mode = addr_mode_zp},
+    {.name = "STA", .op_impl = op_sta, .addr_mode = addr_mode_zp},
+    {.name = "STX", .op_impl = op_stx, .addr_mode = addr_mode_zp},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "DEY", .op_impl = op_dey, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_nop, .addr_mode = NULL},
+    {.name = "TXA", .op_impl = op_txa, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "STY", .op_impl = op_sty, .addr_mode = addr_mode_abs},
+    {.name = "STA", .op_impl = op_sta, .addr_mode = addr_mode_abs},
+    {.name = "STX", .op_impl = op_stx, .addr_mode = addr_mode_abs},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "BCC", .op_impl = op_bcc, .addr_mode = addr_mode_rel},
+    {.name = "STA", .op_impl = op_sta, .addr_mode = addr_mode_izy},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "STY", .op_impl = op_sty, .addr_mode = addr_mode_zpx},
+    {.name = "STA", .op_impl = op_sta, .addr_mode = addr_mode_zpx},
+    {.name = "STX", .op_impl = op_stx, .addr_mode = addr_mode_zpy},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "TYA", .op_impl = op_tya, .addr_mode = NULL},
+    {.name = "STA", .op_impl = op_sta, .addr_mode = addr_mode_aby},
+    {.name = "TXS", .op_impl = op_txs, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_nop, .addr_mode = NULL},
+    {.name = "STA", .op_impl = op_sta, .addr_mode = addr_mode_abx},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "LDY", .op_impl = op_ldy, .addr_mode = addr_mode_imm},
+    {.name = "LDA", .op_impl = op_lda, .addr_mode = addr_mode_izx},
+    {.name = "LDX", .op_impl = op_ldx, .addr_mode = addr_mode_imm},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "LDY", .op_impl = op_ldy, .addr_mode = addr_mode_zp},
+    {.name = "LDA", .op_impl = op_lda, .addr_mode = addr_mode_zp},
+    {.name = "LDX", .op_impl = op_ldx, .addr_mode = addr_mode_zp},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "TAY", .op_impl = op_tay, .addr_mode = NULL},
+    {.name = "LDA", .op_impl = op_lda, .addr_mode = addr_mode_imm},
+    {.name = "TAX", .op_impl = op_tax, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "LDY", .op_impl = op_ldy, .addr_mode = addr_mode_abs},
+    {.name = "LDA", .op_impl = op_lda, .addr_mode = addr_mode_abs},
+    {.name = "LDX", .op_impl = op_ldx, .addr_mode = addr_mode_abs},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "BCS", .op_impl = op_bcs, .addr_mode = addr_mode_rel},
+    {.name = "LDA", .op_impl = op_lda, .addr_mode = addr_mode_izy},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "LDY", .op_impl = op_ldy, .addr_mode = addr_mode_zpx},
+    {.name = "LDA", .op_impl = op_lda, .addr_mode = addr_mode_zpx},
+    {.name = "LDX", .op_impl = op_ldx, .addr_mode = addr_mode_zpy},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "CLV", .op_impl = op_clv, .addr_mode = NULL},
+    {.name = "LDA", .op_impl = op_lda, .addr_mode = addr_mode_aby},
+    {.name = "TSX", .op_impl = op_tsx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "LDY", .op_impl = op_ldy, .addr_mode = addr_mode_abx},
+    {.name = "LDA", .op_impl = op_lda, .addr_mode = addr_mode_abx},
+    {.name = "LDX", .op_impl = op_ldx, .addr_mode = addr_mode_aby},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "CPY", .op_impl = op_cpy, .addr_mode = addr_mode_imm},
+    {.name = "CMP", .op_impl = op_cmp, .addr_mode = addr_mode_izx},
+    {.name = "???", .op_impl = op_nop, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "CPY", .op_impl = op_cpy, .addr_mode = addr_mode_zp},
+    {.name = "CMP", .op_impl = op_cmp, .addr_mode = addr_mode_zp},
+    {.name = "DEC", .op_impl = op_dec, .addr_mode = addr_mode_zp},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "INY", .op_impl = op_iny, .addr_mode = NULL},
+    {.name = "CMP", .op_impl = op_cmp, .addr_mode = addr_mode_imm},
+    {.name = "DEX", .op_impl = op_dex, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "CPY", .op_impl = op_cpy, .addr_mode = addr_mode_abs},
+    {.name = "CMP", .op_impl = op_cmp, .addr_mode = addr_mode_abs},
+    {.name = "DEC", .op_impl = op_dec, .addr_mode = addr_mode_abs},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "BNE", .op_impl = op_bne, .addr_mode = addr_mode_rel},
+    {.name = "CMP", .op_impl = op_cmp, .addr_mode = addr_mode_izy},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_nop, .addr_mode = NULL},
+    {.name = "CMP", .op_impl = op_cmp, .addr_mode = addr_mode_zpx},
+    {.name = "DEC", .op_impl = op_dec, .addr_mode = addr_mode_zpx},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "CLD", .op_impl = op_cld, .addr_mode = NULL},
+    {.name = "CMP", .op_impl = op_cmp, .addr_mode = addr_mode_aby},
+    {.name = "NOP", .op_impl = op_nop, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_nop, .addr_mode = NULL},
+    {.name = "CMP", .op_impl = op_cmp, .addr_mode = addr_mode_abx},
+    {.name = "DEC", .op_impl = op_dec, .addr_mode = addr_mode_abx},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "CPX", .op_impl = op_cpx, .addr_mode = addr_mode_imm},
+    {.name = "SBC", .op_impl = op_sbc, .addr_mode = addr_mode_izx},
+    {.name = "???", .op_impl = op_nop, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "CPX", .op_impl = op_cpx, .addr_mode = addr_mode_zp},
+    {.name = "SBC", .op_impl = op_sbc, .addr_mode = addr_mode_zp},
+    {.name = "INC", .op_impl = op_inc, .addr_mode = addr_mode_zp},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "INX", .op_impl = op_inx, .addr_mode = NULL},
+    {.name = "SBC", .op_impl = op_sbc, .addr_mode = addr_mode_imm},
+    {.name = "NOP", .op_impl = op_nop, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_sbc, .addr_mode = NULL},
+    {.name = "CPX", .op_impl = op_cpx, .addr_mode = addr_mode_abs},
+    {.name = "SBC", .op_impl = op_sbc, .addr_mode = addr_mode_abs},
+    {.name = "INC", .op_impl = op_inc, .addr_mode = addr_mode_abs},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "BEQ", .op_impl = op_beq, .addr_mode = addr_mode_rel},
+    {.name = "SBC", .op_impl = op_sbc, .addr_mode = addr_mode_izy},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_nop, .addr_mode = NULL},
+    {.name = "SBC", .op_impl = op_sbc, .addr_mode = addr_mode_zpx},
+    {.name = "INC", .op_impl = op_inc, .addr_mode = addr_mode_zpx},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "SED", .op_impl = op_sed, .addr_mode = NULL},
+    {.name = "SBC", .op_impl = op_sbc, .addr_mode = addr_mode_aby},
+    {.name = "NOP", .op_impl = op_nop, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
+    {.name = "???", .op_impl = op_nop, .addr_mode = NULL},
+    {.name = "SBC", .op_impl = op_sbc, .addr_mode = addr_mode_abx},
+    {.name = "INC", .op_impl = op_inc, .addr_mode = addr_mode_abx},
+    {.name = "???", .op_impl = op_xxx, .addr_mode = NULL},
 };

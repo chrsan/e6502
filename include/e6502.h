@@ -7,6 +7,9 @@
 extern "C" {
 #endif
 
+typedef uint8_t u8;
+typedef uint16_t u16;
+
 enum InterruptType {
   kInterruptTypeNone,
   kInterruptTypeNmi,
@@ -16,41 +19,29 @@ enum InterruptType {
 struct Bus {
   void* ctx;
 
-  uint8_t (*read)(void* ctx, uint16_t address);
-  void (*write)(void* ctx, uint16_t address, uint8_t value);
+  uint8_t (*read)(void* ctx, u16 addr);
+  void (*write)(void* ctx, u16 addr, u8 data);
 };
-
-struct Instruction {
-  uint8_t num_bytes;
-  uint8_t bytes[3];
-  const char* opcode;
-};
-
-void fetch_instruction(const struct Bus* bus, uint16_t address,
-                       struct Instruction* instr);
 
 struct Cpu {
-  uint8_t a;
-  uint8_t x;
-  uint8_t y;
-  uint8_t s;
-  uint8_t p;
-  uint16_t pc;
-
-  enum InterruptType interrupt;
+  u8 a;
+  u8 x;
+  u8 y;
+  u8 s;
+  u8 p;
+  u16 pc;
 
   const struct Bus* bus;
+  enum InterruptType interrupt;
 };
 
 bool cpu_init(struct Cpu* cpu, const struct Bus* bus);
 
 void cpu_reset(struct Cpu* cpu);
 
-uint8_t cpu_step(struct Cpu* cpu, uint16_t* address, uint8_t* cycles);
+u8 cpu_step(struct Cpu* cpu);
 
-void cpu_trigger_nmi(struct Cpu* cpu);
-
-void cpu_trigger_irq(struct Cpu* cpu);
+// TODO: Interrupts
 
 #ifdef __cplusplus
 }
