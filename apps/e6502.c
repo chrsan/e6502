@@ -161,7 +161,7 @@ int main(int argc, char* argv[]) {
 
   const size_t ram_size = 0x10000 - RAM_OFFSET;
   if (program_data_size > (ram_size - 0x0200)) {
-    fprintf(stderr, "%s does not fit in RAM\n", argv[1]);
+    fprintf(stderr, "%s does not fit in RAM\n", argv[optind]);
     goto err;
   }
 
