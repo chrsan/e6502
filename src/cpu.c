@@ -22,6 +22,8 @@ void write(const struct Cpu* cpu, u16 addr, u8 data) {
   cpu->bus->write(cpu->bus->ctx, addr, data);
 }
 
+const char* opcode_name(u8 opcode) { return (instructions + opcode)->name; }
+
 bool cpu_init(struct Cpu* cpu, const struct Bus* bus) {
   if (!cpu || !bus) {
     return false;
