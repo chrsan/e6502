@@ -43,32 +43,22 @@ struct BusImpl {
 
 static u8 bus_read(void* ctx, u16 address) {
   struct BusImpl* bus = ctx;
-  if (address >= 0x0100) {
-    return bus->ram[address - 0x0100];
-  }
-
-  if (address == 0x0000) {
+  if (address == 0xffe0) {
     return bus->io_full;
-  }
-
-  if (address == 0x0001) {
+  } else if (address == 0xffe1) {
     return bus->io_byte;
+  } else {
+    return bus->ram[address];
   }
-
-  return 0;
 }
-
-#define RAM_OFFSET 0x0100
 
 static void bus_write(void* ctx, u16 address, u8 data) {
   struct BusImpl* bus = ctx;
-  if (address >= RAM_OFFSET) {
-    bus->ram[address - RAM_OFFSET] = data;
-  }
-
-  if (address == 0x0001) {
+  if (address == 0xffe1) {
     bus->io_byte = data;
     bus->io_full = true;
+  } else {
+    bus->ram[address] = data;
   }
 }
 
@@ -159,7 +149,7 @@ int main(int argc, char* argv[]) {
     goto err;
   }
 
-  const size_t ram_size = 0x10000 - RAM_OFFSET;
+  const size_t ram_size = 0x10000;
   if (program_data_size > (ram_size - 0x0200)) {
     fprintf(stderr, "%s does not fit in RAM\n", argv[optind]);
     goto err;
@@ -171,10 +161,10 @@ int main(int argc, char* argv[]) {
     goto err;
   }
 
-  ram[0xfffc - RAM_OFFSET] = 0x00;
-  ram[0xfffd - RAM_OFFSET] = 0x02;
+  ram[0xfffc] = 0x00;
+  ram[0xfffd] = 0x02;
 
-  memcpy(ram + 0x0100, program_data, program_data_size);
+  memcpy(ram + 0x0200, program_data, program_data_size);
   munmap(program_data, program_data_size);
 
   struct BusImpl bus_impl = {

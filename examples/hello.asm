@@ -1,6 +1,6 @@
 .feature string_escapes
 
-  io_stat = $0000
+  io_stat = $ffe0
   io_data = io_stat + 1
 
   .org $0200
